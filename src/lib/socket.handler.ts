@@ -11,6 +11,11 @@ export function setupSocketIO(fastify: FastifyInstance) {
         },
     });
 
+    // Track answered players per room
+    const roomAnswers = new Map<string, Set<string>>();
+    // Track active timers per room
+    const roomTimers = new Map<string, NodeJS.Timeout>();
+
     io.on("connection", (socket) => {
         console.log("Client connected:", socket.id);
 
@@ -100,6 +105,9 @@ export function setupSocketIO(fastify: FastifyInstance) {
                     return;
                 }
 
+                // Initialize room answers tracker
+                roomAnswers.set(data.roomCode, new Set());
+
                 // Send first question to all players
                 const question = game.questions[0];
                 const questionData = {
@@ -116,100 +124,62 @@ export function setupSocketIO(fastify: FastifyInstance) {
                     question: questionData,
                 });
 
-                // Auto-advance to next question after timeout
-                setTimeout(async () => {
-                    io.to(data.roomCode).emit("question-timeout", {
-                        correctAnswer: question.correctAnswer,
-                    });
-
-                    // Wait 3 seconds then move to next question
-                    setTimeout(async () => {
-                        const updatedGame = await gameManager.nextQuestion(
-                            data.roomCode
-                        );
-
-                        if (!updatedGame || updatedGame.status === "finished") {
-                            const leaderboard =
-                                await gameManager.getLeaderboard(data.roomCode);
-                            io.to(data.roomCode).emit("game-finished", {
-                                leaderboard,
-                            });
-                            return;
-                        }
-
-                        const nextQuestion =
-                            updatedGame.questions[
-                                updatedGame.currentQuestionIndex
-                            ];
-                        const nextQuestionData = {
-                            id: nextQuestion.id,
-                            question: nextQuestion.question,
-                            answers: nextQuestion.answers,
-                            timeLimit: nextQuestion.timeLimit,
-                            questionNumber:
-                                updatedGame.currentQuestionIndex + 1,
-                            totalQuestions: updatedGame.questions.length,
-                        };
-
-                        io.to(data.roomCode).emit("next-question", {
-                            question: nextQuestionData,
-                        });
-
-                        // Auto-advance recursively
-                        autoAdvanceQuestion(
-                            data.roomCode,
-                            nextQuestion.timeLimit
-                        );
-                    }, 3000);
+                // Set timer to auto-advance after timeout
+                const timer = setTimeout(async () => {
+                    await advanceToNextQuestion(data.roomCode);
                 }, question.timeLimit * 1000);
 
-                // Helper function for auto-advancing
-                function autoAdvanceQuestion(
-                    roomCode: string,
-                    timeLimit: number
-                ) {
-                    setTimeout(
-                        async () => {
-                            const game =
-                                await gameManager.nextQuestion(roomCode);
-
-                            if (!game || game.status === "finished") {
-                                const leaderboard =
-                                    await gameManager.getLeaderboard(roomCode);
-                                io.to(roomCode).emit("game-finished", {
-                                    leaderboard,
-                                });
-                                return;
-                            }
-
-                            const nextQuestion =
-                                game.questions[game.currentQuestionIndex];
-                            const questionData = {
-                                id: nextQuestion.id,
-                                question: nextQuestion.question,
-                                answers: nextQuestion.answers,
-                                timeLimit: nextQuestion.timeLimit,
-                                questionNumber: game.currentQuestionIndex + 1,
-                                totalQuestions: game.questions.length,
-                            };
-
-                            io.to(roomCode).emit("next-question", {
-                                question: questionData,
-                            });
-
-                            // Continue auto-advancing
-                            autoAdvanceQuestion(
-                                roomCode,
-                                nextQuestion.timeLimit
-                            );
-                        },
-                        timeLimit * 1000 + 3000
-                    ); // Question time + 3 seconds showing answer
-                }
+                roomTimers.set(data.roomCode, timer);
             } catch (error) {
                 socket.emit("error", { message: "Failed to start game" });
             }
         });
+
+        // Helper function to advance to next question
+        async function advanceToNextQuestion(roomCode: string) {
+            // Clear timer
+            const timer = roomTimers.get(roomCode);
+            if (timer) {
+                clearTimeout(timer);
+                roomTimers.delete(roomCode);
+            }
+
+            // Clear answered players for this question
+            roomAnswers.set(roomCode, new Set());
+
+            const game = await gameManager.nextQuestion(roomCode);
+
+            if (!game || game.status === "finished") {
+                const leaderboard = await gameManager.getLeaderboard(roomCode);
+                io.to(roomCode).emit("game-finished", { leaderboard });
+                roomAnswers.delete(roomCode);
+                return;
+            }
+
+            const question = game.questions[game.currentQuestionIndex];
+            const questionData = {
+                id: question.id,
+                question: question.question,
+                answers: question.answers,
+                timeLimit: question.timeLimit,
+                questionNumber: game.currentQuestionIndex + 1,
+                totalQuestions: game.questions.length,
+            };
+
+            // Wait 3 seconds before showing next question
+            setTimeout(() => {
+                io.to(roomCode).emit("next-question", {
+                    question: questionData,
+                });
+
+                // Set timer for next question
+                const newTimer = setTimeout(async () => {
+                    await advanceToNextQuestion(roomCode);
+                }, question.timeLimit * 1000);
+
+                roomTimers.set(roomCode, newTimer);
+            }, 3000);
+        }
 
         // Submit answer
         socket.on(
@@ -218,14 +188,14 @@ export function setupSocketIO(fastify: FastifyInstance) {
                 roomCode: string;
                 playerId: string;
                 answerIndex: number;
-                timeElapsed: number;
+                timeElapsed?: number;
             }) => {
                 try {
                     const result = await gameManager.submitAnswer(
                         data.roomCode,
                         data.playerId,
                         data.answerIndex,
-                        data.timeElapsed
+                        data.timeElapsed || 0
                     );
 
                     if (!result) {
@@ -241,13 +211,21 @@ export function setupSocketIO(fastify: FastifyInstance) {
                         points: result.points,
                     });
 
-                    // Update leaderboard for all players
-                    const leaderboard = await gameManager.getLeaderboard(
-                        data.roomCode
-                    );
-                    io.to(data.roomCode).emit("leaderboard-update", {
-                        leaderboard,
-                    });
+                    // Track answered player
+                    const answered =
+                        roomAnswers.get(data.roomCode) || new Set();
+                    answered.add(data.playerId);
+                    roomAnswers.set(data.roomCode, answered);
+
+                    // Check if all players have answered
+                    const game = await gameManager.getGame(data.roomCode);
+                    if (game && answered.size >= game.players.length) {
+                        console.log(
+                            "All players answered, advancing immediately"
+                        );
+                        // All players answered, advance immediately
+                        await advanceToNextQuestion(data.roomCode);
+                    }
                 } catch (error) {
                     socket.emit("error", {
                         message: "Failed to submit answer",
@@ -314,6 +292,40 @@ export function setupSocketIO(fastify: FastifyInstance) {
                 socket.emit("error", { message: "Failed to get leaderboard" });
             }
         });
+
+        // Get current question (for players who join mid-game or reload)
+        socket.on(
+            "get-current-question",
+            async (data: { roomCode: string; playerId: string }) => {
+                try {
+                    const game = await gameManager.getGame(data.roomCode);
+
+                    if (!game || game.status !== "playing") {
+                        socket.emit("error", {
+                            message: "Game not found or not started",
+                        });
+                        return;
+                    }
+
+                    const question = game.questions[game.currentQuestionIndex];
+                    const questionData = {
+                        id: question.id,
+                        question: question.question,
+                        answers: question.answers,
+                        timeLimit: question.timeLimit,
+                        correctAnswer: question.correctAnswer,
+                        questionNumber: game.currentQuestionIndex + 1,
+                        totalQuestions: game.questions.length,
+                    };
+
+                    socket.emit("current-question", { question: questionData });
+                } catch (error) {
+                    socket.emit("error", {
+                        message: "Failed to get current question",
+                    });
+                }
+            }
+        );
 
         socket.on("disconnect", () => {
             console.log("Client disconnected:", socket.id);
