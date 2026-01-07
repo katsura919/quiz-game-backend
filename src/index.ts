@@ -2,7 +2,7 @@ import fastify from "fastify";
 import cors from "@fastify/cors";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
-import { setupSocketIO } from "./lib/socket.handlet";
+import { setupSocketIO } from "./lib/socket.handler";
 import { triviaSetRoutes } from "./modules/triviaSet/triviaSet.routes";
 import { gameRoutes } from "./modules/game/game.routes";
 import { adminAuthRoutes } from "./modules/admin-auth/admin.auth.route";
