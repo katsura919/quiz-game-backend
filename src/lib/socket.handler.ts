@@ -116,12 +116,96 @@ export function setupSocketIO(fastify: FastifyInstance) {
                     question: questionData,
                 });
 
-                // Start timer
-                setTimeout(() => {
+                // Auto-advance to next question after timeout
+                setTimeout(async () => {
                     io.to(data.roomCode).emit("question-timeout", {
                         correctAnswer: question.correctAnswer,
                     });
+
+                    // Wait 3 seconds then move to next question
+                    setTimeout(async () => {
+                        const updatedGame = await gameManager.nextQuestion(
+                            data.roomCode
+                        );
+
+                        if (!updatedGame || updatedGame.status === "finished") {
+                            const leaderboard =
+                                await gameManager.getLeaderboard(data.roomCode);
+                            io.to(data.roomCode).emit("game-finished", {
+                                leaderboard,
+                            });
+                            return;
+                        }
+
+                        const nextQuestion =
+                            updatedGame.questions[
+                                updatedGame.currentQuestionIndex
+                            ];
+                        const nextQuestionData = {
+                            id: nextQuestion.id,
+                            question: nextQuestion.question,
+                            answers: nextQuestion.answers,
+                            timeLimit: nextQuestion.timeLimit,
+                            questionNumber:
+                                updatedGame.currentQuestionIndex + 1,
+                            totalQuestions: updatedGame.questions.length,
+                        };
+
+                        io.to(data.roomCode).emit("next-question", {
+                            question: nextQuestionData,
+                        });
+
+                        // Auto-advance recursively
+                        autoAdvanceQuestion(
+                            data.roomCode,
+                            nextQuestion.timeLimit
+                        );
+                    }, 3000);
                 }, question.timeLimit * 1000);
+
+                // Helper function for auto-advancing
+                function autoAdvanceQuestion(
+                    roomCode: string,
+                    timeLimit: number
+                ) {
+                    setTimeout(
+                        async () => {
+                            const game =
+                                await gameManager.nextQuestion(roomCode);
+
+                            if (!game || game.status === "finished") {
+                                const leaderboard =
+                                    await gameManager.getLeaderboard(roomCode);
+                                io.to(roomCode).emit("game-finished", {
+                                    leaderboard,
+                                });
+                                return;
+                            }
+
+                            const nextQuestion =
+                                game.questions[game.currentQuestionIndex];
+                            const questionData = {
+                                id: nextQuestion.id,
+                                question: nextQuestion.question,
+                                answers: nextQuestion.answers,
+                                timeLimit: nextQuestion.timeLimit,
+                                questionNumber: game.currentQuestionIndex + 1,
+                                totalQuestions: game.questions.length,
+                            };
+
+                            io.to(roomCode).emit("next-question", {
+                                question: questionData,
+                            });
+
+                            // Continue auto-advancing
+                            autoAdvanceQuestion(
+                                roomCode,
+                                nextQuestion.timeLimit
+                            );
+                        },
+                        timeLimit * 1000 + 3000
+                    ); // Question time + 3 seconds showing answer
+                }
             } catch (error) {
                 socket.emit("error", { message: "Failed to start game" });
             }
