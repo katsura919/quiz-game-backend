@@ -5,6 +5,7 @@ import mongoose from "mongoose";
 import { setupSocketIO } from "./lib/socket.handlet";
 import { triviaSetRoutes } from "./modules/triviaSet/triviaSet.routes";
 import { gameRoutes } from "./modules/game/game.routes";
+import { adminAuthRoutes } from "./modules/admin-auth/admin.auth.route";
 
 dotenv.config();
 
@@ -38,17 +39,18 @@ app.get("/api/health", async (request, reply) => {
 // Register API routes
 app.register(triviaSetRoutes);
 app.register(gameRoutes);
+app.register(adminAuthRoutes);
 
 const start = async () => {
     try {
         await connectDB();
 
-        await app.listen({ port: 3000, host: "0.0.0.0" });
+        await app.listen({ port: 5000, host: "0.0.0.0" });
 
         // Setup Socket.IO after server starts
         setupSocketIO(app);
 
-        console.log("Server running on http://localhost:3000");
+        console.log("Server running on http://localhost:5000");
     } catch (err) {
         app.log.error(err);
         process.exit(1);
